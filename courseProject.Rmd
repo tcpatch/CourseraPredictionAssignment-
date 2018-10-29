@@ -1,0 +1,144 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Taylor P"
+date: "October 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Practical Machine Learning Assignment
+
+This reports details how a model was built and used to predict how well exercise was preformed based on various measurements. The dataset is detailed at http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har. First the data is loaded.
+
+1) How you built your model.
+2) How you used cross validation. 
+3) The sample error.
+4) Use your prediction model to predict 20 different test cases.
+
+
+```{r loading_data, echo=TRUE, cache=TRUE, warn=-1}
+library(caret)
+library(randomForest)
+library(e1071)
+library(Rtsne)
+#load the data from the provided links for the testing and training sets
+training_url <- paste0("https://d396qusza40orc.cloudfront.net/predmachlearn/pm",
+                       "l-training.csv")
+test_url <- paste0("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-te",
+                   "sting.csv")
+training_df <- read.csv(training_url)
+test_df <- read.csv(test_url)
+#select columns for prediction based on graphing (not shown due to space 
+#limiations)
+good_cols <- c("amplitude_pitch_belt", "var_total_accel_belt", "stdev_pitch_belt", 
+               "var_pitch_belt", "accel_belt_z", "accel_arm_x", "magnet_arm_x", 
+               "magnet_arm_y", "max_pitch_arm", "min_roll_arm", "yaw_dumbbell", 
+               "max_roll_dumbbell", "max_pitch_dumbbell", "amplitude_pitch_arm", 
+               "amplitude_yaw_arm", "avg_roll_dumbbell", "avg_pitch_dumbbell", 
+               "stddev_pitch_dumbbell", "avg_yaw_dumbbell", "magnet_dumbbell_x", 
+               "roll_forearm", "yaw_forearm", "min_roll_forearm", 
+               "min_pitch_forearm", "ampitude_roll_forearm", 
+               "amplitude_pitch_forearm", "max_roll_forearm", 
+               "stddev_roll_forearm", "avg_pitch_forearm", "stddev_yaw_forearm", 
+               "accel_forearm_x", "roll_belt", "pitch_belt", "yaw_belt", 
+               "max_roll_belt", "max_pitch_belt", "min_roll_belt", 
+               "avg_roll_belt", "magnet_belt_y", "magnet_belt_z",
+               "var_accel_arm", "stddev_pitch_arm", "stddev_yaw_arm",
+               "magnet_arm_z", "max_yaw_arm", "min_yaw_arm",
+               "amplitude_roll_arm", "roll_dumbbell", "pitch_dumbbell",
+               "min_roll_dumbbell", "min_pitch_dumbbell", 
+               "amplitude_roll_dumbbell", "amplitude_pitch_dumbbell", 
+               "stddev_roll_dumbbell", "stddev_yaw_dumbbell", 
+               "accel_dumbbell_y", "pitch_forearm", "max_pitch_forearm", 
+               "var_accel_forearm", "var_roll_forearm", "stddev_pitch_forearm",
+               "magnet_forearm_x")
+#subset the columns of interest
+used_cols <- which(colnames(training_df) %in% good_cols)
+test_cols <- which(colnames(test_df) %in% good_cols)
+#add the classe variable to the training dataframe
+used_df <- training_df[,c(used_cols, which(colnames(training_df) == "classe"))]
+test_used_df <- test_df[, c(test_cols)]
+
+#remove incomplete measurements
+bad_cols <- rep(NA, times=ncol(used_df))
+bad_test_cols <- rep(NA, times=ncol(test_used_df))
+for (i in 1:(ncol(used_df)-1)) {
+  bad_cols[i] <- any(is.na(used_df[,i]))
+  bad_test_cols[i] <- any(is.na(test_used_df[,i]))
+}
+bad_cols[i+1] <- F
+used_df <- used_df[,!bad_cols]
+used_df <- used_df[complete.cases(used_df),]
+test_used_df <- test_used_df[, !bad_test_cols]
+test_used_df <- test_used_df[complete.cases(test_used_df),]
+```
+
+To evaluate if the selected columns were appropriate for training a classifier, the data was clustered using tSNE to see if there was a structure to the data.
+
+```{R evaluateVaraibles, echo=TRUE, cache=TRUE}
+#normalize all variables between 0 and 1 for better tSNE clustering
+tsne_df <- used_df
+for (i in 1:(ncol(used_df)-1)) {
+  tsne_df[,i] <- (used_df[,i]-min(used_df[,i]))/(max(used_df[,i])-min(used_df[,i]))
+}
+#add the classe variable to the dataframe
+tsne_df$classe <- used_df$classe
+#down sample 1000 events
+n <- sample(x=1:nrow(tsne_df), size=1000)
+set.seed(75)
+#run tSNE clustering of selected columns
+tsne <- Rtsne(tsne_df[n, 1:(ncol(tsne_df)-1)],
+              dims = 2,
+              initial_dims = 5000,
+              theta=0.0,
+              perplexity=50,
+              verbose=FALSE,
+              check_duplicates=FALSE,
+              pca=TRUE,
+              pca_center=TRUE,
+              pca_scale=FALSE,
+              stop_lying_iter = 1000,
+              mom_switch_iter = 5000,
+              momentum=0.2,
+              final_momentum=0.5,
+              eta=20.0, #20.0
+              exaggeration_factor=500,
+              max_iter = 25000)
+
+colors = c("red", "orange", "green", "blue", "purple")
+names(colors) = unique(tsne_df$classe)
+
+#plot tSNE clustering of selected columns
+plot(tsne$Y, 
+     t='n',
+     main="StDev tSNE",
+     xlab="tSNE-X",
+     ylab="tSNE-Y")
+points(tsne$Y, col=colors[tsne_df$classe[n]], pch=16)
+```
+
+1) The tSNE indicated that there is a structure to the data. This prompted the choice of a random forest classifier.
+2) The random forest classifier was cross validated on 40% of the data as there are `r format(nrow(used_df)*0.6, scientific=F)` observations available to train the random forest.
+
+``` {R trainModel, echo=TRUE, cache=TRUE}
+used_df$classe <- as.factor(used_df$classe)
+##partition the dataset into training and test sets by outcome classe
+inTrain=createDataPartition(used_df$classe, p=0.6, list=FALSE)
+used_df2=used_df[inTrain,]
+test_set=used_df[-inTrain,]
+modFit=train(classe ~ ., method="rf", data=used_df2)
+pred_proba=predict(modFit, test_set)
+##accuracy from random forest
+acc <- confusionMatrix(pred_proba, test_set[, "classe"])$overall
+```
+
+3) The error rate is `r paste0(round((1-acc[[1]])*100,2), "%")`
+
+```{r evaluateModel, echo=TRUE, cache=TRUE}
+pred_testing=predict(modFit,test_used_df)
+```
+
+4) The test cases were predicted with the classifier and found to be `r pred_testing`
